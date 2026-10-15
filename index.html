@@ -241,17 +241,17 @@
       </div>
       <div>
         <label for="savings">Savings / Reserve (fixed)</label>
-        <input type="number" id="savings" value="5000" min="0" step="0.01">
+        <input type="number" id="savings" value="5000" min="0" step="0.01" readonly>
       </div>
     </div>
     <div class="grid cols-3">
       <div>
         <label for="platformPct">Platform Fee (%)</label>
-        <input type="number" id="platformPct" value="10" min="0" step="0.1">
+        <input type="number" id="platformPct" value="10" min="0" step="0.1" readonly>
       </div>
       <div>
         <label for="depositPct">Deposit Fee (%)</label>
-        <input type="number" id="depositPct" value="4" min="0" step="0.1">
+        <input type="number" id="depositPct" value="4" min="0" step="0.1" readonly>
       </div>
       <div>
         <label for="feeBase">Percentage Fees Applied To</label>
@@ -260,6 +260,11 @@
           <option value="total">Total payment</option>
         </select>
       </div>
+    </div>
+    <div class="toggle-row" style="margin-top:8px">
+      <button class="btn-ghost" id="feeLockBtn" onclick="toggleFeeEdit()" style="padding:8px 16px;font-size:13px">
+        <span id="feeLockIcon">🔒</span> Unlock to Edit Fees
+      </button>
     </div>
   </div>
 
@@ -360,6 +365,7 @@ let manualWithdrawFee = DEFAULT_WITHDRAW_FEE;
 const AUTH_KEY = 'Matrix@112233';
 const AUTH_STORAGE_KEY = 'zcanopy_auth_encrypted';
 let pctUnlocked = false;
+let feeUnlocked = false;
 
 async function getEncryptionKey(password, salt) {
   const enc = new TextEncoder();
@@ -431,7 +437,7 @@ async function verifyAuth(inputKey) {
 }
 
 function setPctInputsReadOnly(readonly) {
-  ['founderPct', 'financerPct', 'marketeerPct'].forEach(id => {
+  ['founderPct', 'financerPct', 'marketeerPct', 'platformPct', 'depositPct', 'savings'].forEach(id => {
     const el = document.getElementById(id);
     el.readOnly = readonly;
     el.style.background = readonly ? '#eef4f0' : '#fbfdfc';
@@ -456,6 +462,27 @@ async function togglePctEdit() {
     setPctInputsReadOnly(false);
     document.getElementById('lockIcon').textContent = '🔓';
     document.getElementById('pctLockBtn').innerHTML = '<span id="lockIcon">🔓</span> Lock Percentages';
+  } else {
+    alert('Invalid authentication key.');
+  }
+}
+
+async function toggleFeeEdit() {
+  if (feeUnlocked) {
+    feeUnlocked = false;
+    setPctInputsReadOnly(true);
+    document.getElementById('feeLockIcon').textContent = '🔒';
+    document.getElementById('feeLockBtn').innerHTML = '<span id="feeLockIcon">🔒</span> Unlock to Edit Fees';
+    return;
+  }
+  const input = prompt('Enter authentication key to edit fees:');
+  if (!input) return;
+  const valid = await verifyAuth(input);
+  if (valid) {
+    feeUnlocked = true;
+    setPctInputsReadOnly(false);
+    document.getElementById('feeLockIcon').textContent = '🔓';
+    document.getElementById('feeLockBtn').innerHTML = '<span id="feeLockIcon">🔓</span> Lock Fees';
   } else {
     alert('Invalid authentication key.');
   }
@@ -560,7 +587,7 @@ function render(){
   const head = `<tr>
       <th>Payment</th>
       <th>Founder Gross (${s.founder}%)</th>
-      <th>Withdraw</th>
+      <th>Withdraw Fee</th>
       <th>Platform (${s.platformPct}%)</th>
       <th>Savings/Reserve</th>
       <th>Deposit (${s.depositPct}%)</th>
@@ -836,10 +863,27 @@ function resetForm(){
 document.getElementById('feeBase').addEventListener('change', render);
 document.getElementById('invoiceMember').addEventListener('change', renderInvoice);
 
-document.getElementById('useIotecFee').addEventListener('change', function(){
-  const input = document.getElementById('withdrawFee');
-  if (!this.checked){ input.value = manualWithdrawFee; }
-  render();
+document.getElementById('useIotecFee').addEventListener('change', async function(){
+  if (this.checked) {
+    // Turning ON ioTec schedule - allow without auth (default)
+    render();
+    return;
+  }
+  // Turning OFF ioTec schedule - require auth
+  const input = prompt('Enter authentication key to disable ioTec/Centipid fee schedule:');
+  if (!input) {
+    this.checked = true; // Revert
+    return;
+  }
+  const valid = await verifyAuth(input);
+  if (valid) {
+    const feeInput = document.getElementById('withdrawFee');
+    feeInput.value = manualWithdrawFee;
+    render();
+  } else {
+    alert('Invalid authentication key.');
+    this.checked = true; // Revert
+  }
 });
 document.getElementById('withdrawFee').addEventListener('input', function(){
   if (!iotecOn()) manualWithdrawFee = parseFloat(this.value) || 0;
