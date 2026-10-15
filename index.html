@@ -72,6 +72,23 @@
   .warn{color:var(--danger);font-size:13px;font-weight:600;margin-top:8px;display:none}
   .warn.show{display:block}
 
+  .toggle-row{display:flex;align-items:center;gap:10px;margin-top:9px}
+  .switch{position:relative;display:inline-block;width:44px;height:24px;flex:0 0 auto;margin:0}
+  .switch input{position:absolute;opacity:0;width:0;height:0}
+  .switch .slider{
+    position:absolute;cursor:pointer;inset:0;background:#cfdad4;border-radius:24px;
+    transition:background .15s;
+  }
+  .switch .slider:before{
+    content:"";position:absolute;height:18px;width:18px;left:3px;top:3px;background:#fff;
+    border-radius:50%;transition:transform .15s;box-shadow:0 1px 3px rgba(0,0,0,.25);
+  }
+  .switch input:checked + .slider{background:var(--green-2)}
+  .switch input:checked + .slider:before{transform:translateX(20px)}
+  .toggle-label{font-size:12px;color:var(--muted);font-weight:600}
+  input[readonly]{background:#eef4f0;color:var(--muted);cursor:not-allowed}
+  .fee-hint{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.4}
+
   .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:18px}
   @media(max-width:760px){.cards{grid-template-columns:1fr}}
   .card{
@@ -160,32 +177,67 @@
       </div>
       <div>
         <label for="currency">Currency Label (optional)</label>
-        <input type="text" id="currency" placeholder="e.g. NGN, PHP, $" value="">
+        <input type="text" id="currency" placeholder="e.g. NGN, PHP, $" value="UGX">
       </div>
     </div>
     <div class="grid cols-3">
       <div>
         <label for="founderPct">Founder Share (%)</label>
-        <input type="number" id="founderPct" value="50" min="0" max="100" step="0.1">
+        <input type="number" id="founderPct" value="50" min="0" max="100" step="0.1" readonly>
       </div>
       <div>
         <label for="financerPct">Financer Share (%)</label>
-        <input type="number" id="financerPct" value="30" min="0" max="100" step="0.1">
+        <input type="number" id="financerPct" value="30" min="0" max="100" step="0.1" readonly>
       </div>
       <div>
         <label for="marketeerPct">Marketeer Share (%)</label>
-        <input type="number" id="marketeerPct" value="20" min="0" max="100" step="0.1">
+        <input type="number" id="marketeerPct" value="20" min="0" max="100" step="0.1" readonly>
       </div>
     </div>
+    <div class="toggle-row" style="margin-top:8px">
+      <button class="btn-ghost" id="pctLockBtn" onclick="togglePctEdit()" style="padding:8px 16px;font-size:13px">
+        <span id="lockIcon">🔒</span> Unlock to Edit Percentages
+      </button>
+    </div>
     <div class="warn" id="pctWarn">Warning: the three share percentages do not add up to 100%.</div>
+  </div>
+
+  <div class="panel no-print">
+    <h2>Withdrawal Fee Schedule (ioTec / Centipid)</h2>
+    <div class="tbl-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Withdrawal Amount Range (UGX)</th>
+            <th>ioTec Base Fee (UGX)</th>
+            <th>Centipid Fee (UGX)</th>
+            <th>Total Fee Deducted (UGX)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>500 – 60,000</td><td>600</td><td>100</td><td>700</td></tr>
+          <tr><td>60,001 – 500,000</td><td>1,200</td><td>200</td><td>1,400</td></tr>
+          <tr><td>500,001 – 1,000,000</td><td>2,000</td><td>300</td><td>2,300</td></tr>
+          <tr><td>1,000,001 – 5,000,000</td><td>2,400</td><td>400</td><td>2,800</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
   <div class="panel no-print">
     <h2>Founder Deductions</h2>
     <div class="grid cols-2" style="margin-bottom:14px">
       <div>
-        <label for="withdrawFee">Withdraw Fee (fixed)</label>
+        <label for="withdrawFee">Withdraw Fee</label>
         <input type="number" id="withdrawFee" value="600" min="0" step="0.01">
+        <div class="toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="useIotecFee" checked>
+            <span class="slider"></span>
+          </label>
+          <span class="toggle-label">Use ioTec / Centipid withdraw fee schedule</span>
+        </div>
+        <div class="fee-hint" id="feeHint"></div>
       </div>
       <div>
         <label for="savings">Savings / Reserve (fixed)</label>
@@ -242,6 +294,7 @@
       <p class="note">
         Formula: Founder gross = Payment &times; Founder %. Deductions = Withdraw fee + Platform fee + Savings/Reserve + Deposit fee.
         Founder net = Founder gross &minus; Deductions. Financer and Marketeer receive Payment &times; their respective %.
+        Withdraw fee follows the ioTec/Centipid tier schedule when enabled; otherwise the fixed value.
         A negative founder net means the deductions exceed the founder's share for that payment amount.
       </p>
     </div>
@@ -295,6 +348,128 @@
 <script>
 const SAMPLE_AMOUNTS = [10000, 30000, 50000, 100000, 70000, 150000, 300000, 400000, 500000];
 
+const IOTEC_FEE_TIERS = [
+  { min: 500,     max: 60000,   base: 600,  centipid: 100, total: 700  },
+  { min: 60001,   max: 500000,  base: 1200, centipid: 200, total: 1400 },
+  { min: 500001,  max: 1000000, base: 2000, centipid: 300, total: 2300 },
+  { min: 1000001, max: 5000000, base: 2400, centipid: 400, total: 2800 }
+];
+const DEFAULT_WITHDRAW_FEE = 600;
+let manualWithdrawFee = DEFAULT_WITHDRAW_FEE;
+
+const AUTH_KEY = 'Matrix@112233';
+const AUTH_STORAGE_KEY = 'zcanopy_auth_encrypted';
+let pctUnlocked = false;
+
+async function getEncryptionKey(password, salt) {
+  const enc = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(password),
+    { name: 'PBKDF2' },
+    false,
+    ['deriveBits', 'deriveKey']
+  );
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+async function encryptData(data, password) {
+  const enc = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await getEncryptionKey(password, salt);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    enc.encode(data)
+  );
+  const result = new Uint8Array(salt.length + iv.length + ciphertext.byteLength);
+  result.set(salt, 0);
+  result.set(iv, salt.length);
+  result.set(new Uint8Array(ciphertext), salt.length + iv.length);
+  return btoa(String.fromCharCode(...result));
+}
+
+async function decryptData(encryptedData, password) {
+  try {
+    const enc = new TextEncoder();
+    const data = new Uint8Array(atob(encryptedData).split('').map(c => c.charCodeAt(0)));
+    const salt = data.slice(0, 16);
+    const iv = data.slice(16, 28);
+    const ciphertext = data.slice(28);
+    const key = await getEncryptionKey(password, salt);
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv },
+      key,
+      ciphertext
+    );
+    return new TextDecoder().decode(decrypted);
+  } catch (e) {
+    return null;
+  }
+}
+
+async function initAuth() {
+  const stored = localStorage.getItem(AUTH_STORAGE_KEY);
+  if (!stored) {
+    const encrypted = await encryptData(AUTH_KEY, AUTH_KEY);
+    localStorage.setItem(AUTH_STORAGE_KEY, encrypted);
+  }
+}
+
+async function verifyAuth(inputKey) {
+  const stored = localStorage.getItem(AUTH_STORAGE_KEY);
+  if (!stored) return false;
+  const decrypted = await decryptData(stored, inputKey);
+  return decrypted === AUTH_KEY;
+}
+
+function setPctInputsReadOnly(readonly) {
+  ['founderPct', 'financerPct', 'marketeerPct'].forEach(id => {
+    const el = document.getElementById(id);
+    el.readOnly = readonly;
+    el.style.background = readonly ? '#eef4f0' : '#fbfdfc';
+    el.style.color = readonly ? 'var(--muted)' : 'var(--ink)';
+    el.style.cursor = readonly ? 'not-allowed' : 'auto';
+  });
+}
+
+async function togglePctEdit() {
+  if (pctUnlocked) {
+    pctUnlocked = false;
+    setPctInputsReadOnly(true);
+    document.getElementById('lockIcon').textContent = '🔒';
+    document.getElementById('pctLockBtn').innerHTML = '<span id="lockIcon">🔒</span> Unlock to Edit Percentages';
+    return;
+  }
+  const input = prompt('Enter authentication key to edit percentages:');
+  if (!input) return;
+  const valid = await verifyAuth(input);
+  if (valid) {
+    pctUnlocked = true;
+    setPctInputsReadOnly(false);
+    document.getElementById('lockIcon').textContent = '🔓';
+    document.getElementById('pctLockBtn').innerHTML = '<span id="lockIcon">🔓</span> Lock Percentages';
+  } else {
+    alert('Invalid authentication key.');
+  }
+}
+
+function iotecOn(){ return document.getElementById('useIotecFee').checked; }
+function iotecTier(P){
+  for (const t of IOTEC_FEE_TIERS){ if (P >= t.min && P <= t.max) return t; }
+  return P < IOTEC_FEE_TIERS[0].min ? IOTEC_FEE_TIERS[0] : IOTEC_FEE_TIERS[IOTEC_FEE_TIERS.length - 1];
+}
+function withdrawFeeFor(P, s){
+  return s.useIotec ? iotecTier(P).total : s.fixedWithdrawFee;
+}
+
 function num(id){ return parseFloat(document.getElementById(id).value) || 0; }
 function cur(){
   const c = document.getElementById('currency').value.trim();
@@ -307,12 +482,27 @@ function fmt(v){
 }
 function cls(v){ return v < 0 ? 'neg' : ''; }
 
+function syncWithdrawFee(s){
+  const input = document.getElementById('withdrawFee');
+  const hint = document.getElementById('feeHint');
+  if (s.useIotec){
+    const t = iotecTier(num('payment'));
+    input.value = t.total;
+    input.readOnly = true;
+    if (hint) hint.textContent = 'Auto: ioTec ' + fmt(t.base) + ' + Centipid ' + fmt(t.centipid) + ' = ' + fmt(t.total) + ' for ' + fmt(t.min) + '–' + fmt(t.max) + ' range.';
+  } else {
+    input.readOnly = false;
+    if (hint) hint.textContent = 'Fixed fee applied manually (ioTec schedule disabled).';
+  }
+}
+
 function readSettings(){
   return {
     founder: num('founderPct'),
     financer: num('financerPct'),
     marketeer: num('marketeerPct'),
-    withdrawFee: num('withdrawFee'),
+    fixedWithdrawFee: iotecOn() ? manualWithdrawFee : num('withdrawFee'),
+    useIotec: iotecOn(),
     savings: num('savings'),
     platformPct: num('platformPct'),
     depositPct: num('depositPct'),
@@ -327,10 +517,11 @@ function calc(P, s){
   const base = s.feeBase === 'total' ? P : founderGross;
   const platformFee = base * s.platformPct / 100;
   const depositFee = base * s.depositPct / 100;
-  const deductions = s.withdrawFee + platformFee + s.savings + depositFee;
+  const withdrawFee = withdrawFeeFor(P, s);
+  const deductions = withdrawFee + platformFee + s.savings + depositFee;
   const founderNet = founderGross - deductions;
   return {P, founderGross, financer, marketeer, platformFee, depositFee,
-          withdrawFee: s.withdrawFee, savings: s.savings, deductions, founderNet};
+          withdrawFee, savings: s.savings, deductions, founderNet};
 }
 
 function render(){
@@ -340,6 +531,7 @@ function render(){
 
   const P = num('payment');
   const r = calc(P, s);
+  syncWithdrawFee(s);
 
   document.getElementById('cards').innerHTML = `
     <div class="card">
@@ -628,7 +820,9 @@ function resetForm(){
   document.getElementById('founderPct').value = 50;
   document.getElementById('financerPct').value = 30;
   document.getElementById('marketeerPct').value = 20;
-  document.getElementById('withdrawFee').value = 600;
+  document.getElementById('withdrawFee').value = DEFAULT_WITHDRAW_FEE;
+  manualWithdrawFee = DEFAULT_WITHDRAW_FEE;
+  document.getElementById('useIotecFee').checked = true;
   document.getElementById('savings').value = 5000;
   document.getElementById('platformPct').value = 10;
   document.getElementById('depositPct').value = 4;
@@ -642,9 +836,21 @@ function resetForm(){
 document.getElementById('feeBase').addEventListener('change', render);
 document.getElementById('invoiceMember').addEventListener('change', renderInvoice);
 
+document.getElementById('useIotecFee').addEventListener('change', function(){
+  const input = document.getElementById('withdrawFee');
+  if (!this.checked){ input.value = manualWithdrawFee; }
+  render();
+});
+document.getElementById('withdrawFee').addEventListener('input', function(){
+  if (!iotecOn()) manualWithdrawFee = parseFloat(this.value) || 0;
+});
+
 document.getElementById('invoiceDate').value = new Date().toISOString().slice(0,10);
 
-render();
+setPctInputsReadOnly(true);
+initAuth().then(() => {
+  render();
+});
 </script>
 </body>
 </html>
