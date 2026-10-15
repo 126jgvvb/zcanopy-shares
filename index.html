@@ -136,6 +136,12 @@
   .inv-table th{background:var(--leaf);color:var(--green);text-align:left;padding:11px 14px;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
   .inv-table th.amt,.inv-table td.amt{text-align:right;white-space:nowrap}
   .inv-table td{padding:11px 14px;border-bottom:1px solid var(--line)}
+  @media(max-width:480px){
+    .inv-table{font-size:12px}
+    .inv-table th,.inv-table td{padding:8px 10px}
+    .inv-table th.amt,.inv-table td.amt{white-space:normal}
+    .inv-table td:first-child{word-break:break-word}
+  }
   .inv-total{
     display:flex;justify-content:space-between;align-items:center;
     background:var(--green);color:#fff;border-radius:10px;padding:16px 20px;margin-top:16px;
@@ -735,12 +741,14 @@ function renderInvoice(){
       </div>
     </div>
 
+    <div class="tbl-scroll" style="margin-top:10px">
     <table class="inv-table">
       <thead>
         <tr><th>Description</th><th class="amt">Amount</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
+  </div>
 
     <div class="inv-total">
       <span class="lbl">Total Due &mdash; ${titles[member]}</span>
