@@ -100,7 +100,11 @@
                 <h1 class="text-2xl md:text-3xl font-bold text-slate-900 tracking-tight">Interactive Financial Dashboard</h1>
                 <p class="text-slate-500 mt-1 text-sm md:text-base">Adjust the metrics below to simulate real-time profit and partner distributions.</p>
             </div>
-            <div class="flex items-center gap-3">
+            <div class="flex flex-col sm:flex-row sm:items-center gap-3">
+                <div class="bg-amber-50 text-amber-600 px-4 py-2 rounded-xl text-sm font-semibold border border-slate-100">
+                    <span id="currentMonthLabel">November 2026</span>
+                    <span id="currentDateLabel" class="block text-[11px] font-medium text-slate-500 mt-0.5">Tuesday, 3 November 2026</span>
+                </div>
                 <button onclick="downloadDashboardPDF()" class="no-print bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-colors">
                     Print / Save PDF
                 </button>
@@ -173,6 +177,37 @@
                     Net monthly pool available for split
                 </div>
             </div>
+        </div>
+
+        <!-- Monthly Sales Trend -->
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+            <div class="flex flex-col lg:flex-row lg:items-start justify-between gap-4 mb-5">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-900">Monthly Sales Trend</h2>
+                    <p class="text-xs text-slate-400 mt-1">Sales snapshots are encoded into this page's URL, so they survive reloads and can be bookmarked, shared, or backed up as CSV.</p>
+                </div>
+                <div class="flex flex-col items-start lg:items-end gap-2">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <button id="saveMonthlySalesBtn" onclick="requestSaveMonthlySales()" class="no-print bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-colors">
+                            Save Monthly Sales
+                        </button>
+                        <button onclick="exportMonthlySalesCsv()" class="no-print text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 px-4 py-2 rounded-xl transition-colors">
+                            Export CSV
+                        </button>
+                        <button onclick="document.getElementById('importMonthlySalesFile').click()" class="no-print text-sm font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 px-4 py-2 rounded-xl transition-colors">
+                            Import CSV
+                        </button>
+                        <input id="importMonthlySalesFile" type="file" accept=".csv,text/csv" style="display:none" onchange="importMonthlySalesCsv(event)">
+                        <button id="resetMonthlySalesBtn" onclick="requestResetMonthlySales()" title="Requires the admin key" class="no-print text-sm font-semibold text-rose-600 bg-slate-100 hover:bg-slate-200 px-4 py-2 rounded-xl transition-colors">
+                            Reset Graph Data
+                        </button>
+                    </div>
+                    <p id="monthlySaveStatus" class="text-xs font-semibold text-amber-600">Current month not saved yet.</p>
+                </div>
+            </div>
+            <div id="monthlySalesChart" class="w-full overflow-x-auto"></div>
+            <p class="text-xs text-slate-400 mt-2">Hover or focus any point to see gross sales, net profit, and properties sold.</p>
+            <p id="monthlySalesSummary" class="text-xs text-slate-400 mt-3">No saved months yet.</p>
         </div>
 
         <!-- Main Breakdown: Expenses & Profit Split -->
@@ -327,6 +362,645 @@
             costDigitalOcean: 'DigitalOcean',
             costOther: 'Other / Miscellaneous'
         };
+
+        const monthlySales = [];
+        let currentCalculation = null;
+        let activeMonthKey = getMonthKey();
+        const promptedMonthKeys = new Set();
+
+        const SALES_HASH_KEY = 'sales';
+        const AUTH_KEY = 'Matrix@112233';
+        const AUTH_STORAGE_KEY = 'zcanopy_auth_encrypted';
+
+        async function getEncryptionKey(password, salt) {
+            const enc = new TextEncoder();
+            const keyMaterial = await crypto.subtle.importKey(
+                'raw',
+                enc.encode(password),
+                { name: 'PBKDF2' },
+                false,
+                ['deriveBits', 'deriveKey']
+            );
+            return crypto.subtle.deriveKey(
+                { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+                keyMaterial,
+                { name: 'AES-GCM', length: 256 },
+                false,
+                ['encrypt', 'decrypt']
+            );
+        }
+
+        async function encryptData(data, password) {
+            const enc = new TextEncoder();
+            const salt = crypto.getRandomValues(new Uint8Array(16));
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const key = await getEncryptionKey(password, salt);
+            const ciphertext = await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv },
+                key,
+                enc.encode(data)
+            );
+            const result = new Uint8Array(salt.length + iv.length + ciphertext.byteLength);
+            result.set(salt, 0);
+            result.set(iv, salt.length);
+            result.set(new Uint8Array(ciphertext), salt.length + iv.length);
+            return btoa(String.fromCharCode(...result));
+        }
+
+        async function decryptData(encryptedData, password) {
+            try {
+                const data = new Uint8Array(atob(encryptedData).split('').map(c => c.charCodeAt(0)));
+                const salt = data.slice(0, 16);
+                const iv = data.slice(16, 28);
+                const ciphertext = data.slice(28);
+                const key = await getEncryptionKey(password, salt);
+                const decrypted = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv },
+                    key,
+                    ciphertext
+                );
+                return new TextDecoder().decode(decrypted);
+            } catch (e) {
+                return null;
+            }
+        }
+
+        async function initAuth() {
+            const stored = localStorage.getItem(AUTH_STORAGE_KEY);
+            if (!stored) {
+                const encrypted = await encryptData(AUTH_KEY, AUTH_KEY);
+                localStorage.setItem(AUTH_STORAGE_KEY, encrypted);
+            }
+        }
+
+        async function verifyAuth(inputKey) {
+            const stored = localStorage.getItem(AUTH_STORAGE_KEY);
+            if (!stored) return false;
+            const decrypted = await decryptData(stored, inputKey);
+            return decrypted === AUTH_KEY;
+        }
+
+        function getMonthKey(date = new Date()) {
+            return date.getFullYear() + '-' + String(date.getMonth() + 1).padStart(2, '0');
+        }
+
+        function getMonthLabel(date = new Date()) {
+            return date.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+        }
+
+        function getFullDateLabel(date = new Date()) {
+            return date.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+        }
+
+        function normalizeSavedAt(value) {
+            const text = typeof value === 'string' ? value.trim() : '';
+            if (!text) return { savedAt: '', savedOn: '' };
+            const date = new Date(text);
+            if (isNaN(date.getTime())) return { savedAt: '', savedOn: '' };
+            return { savedAt: date.toISOString(), savedOn: getFullDateLabel(date) };
+        }
+
+        function parseMonthKey(monthKey) {
+            const parts = String(monthKey).split('-');
+            const year = parseInt(parts[0], 10);
+            const month = parseInt(parts[1], 10) - 1;
+            if (!Number.isFinite(year) || !Number.isFinite(month) || month < 0 || month > 11) {
+                return null;
+            }
+            return new Date(year, month, 1);
+        }
+
+        function getMonthLabelFromKey(monthKey) {
+            const date = parseMonthKey(monthKey);
+            return date ? getMonthLabel(date) : monthKey;
+        }
+
+        function getShortMonthLabel(monthKey) {
+            const date = parseMonthKey(monthKey);
+            if (!date) return monthKey;
+            return date.toLocaleDateString(undefined, { month: 'short' }) + " '" + String(date.getFullYear()).slice(-2);
+        }
+
+        function refreshPeriodDisplay() {
+            const now = new Date();
+            const monthEl = document.getElementById('currentMonthLabel');
+            const dateEl = document.getElementById('currentDateLabel');
+            if (monthEl) monthEl.textContent = getMonthLabel(now);
+            if (dateEl) dateEl.textContent = getFullDateLabel(now);
+            return getMonthKey(now);
+        }
+
+        function encodeBase64Url(text) {
+            return btoa(text).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        function decodeBase64Url(encoded) {
+            const base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+            const padded = base64 + '='.repeat((4 - base64.length % 4) % 4);
+            return atob(padded);
+        }
+
+        function serializeMonthlySales() {
+            return monthlySales.map(record => [
+                record.monthKey,
+                Math.round(record.propertiesSold),
+                Math.round(record.grossRevenue),
+                Math.round(record.expenses),
+                Math.round(record.netProfit),
+                record.savedAt || ''
+            ]);
+        }
+
+        function persistMonthlySalesToUrl() {
+            const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+            if (monthlySales.length) {
+                params.set(SALES_HASH_KEY, encodeBase64Url(JSON.stringify(serializeMonthlySales())));
+            } else {
+                params.delete(SALES_HASH_KEY);
+            }
+            const newHash = params.toString();
+            try {
+                history.replaceState(null, '', newHash ? '#' + newHash : location.pathname + location.search);
+            } catch (error) {
+                if (newHash) {
+                    location.hash = newHash;
+                } else if (location.hash) {
+                    location.hash = '';
+                }
+            }
+        }
+
+        function loadMonthlySalesFromUrl() {
+            monthlySales.length = 0;
+            const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+            const encoded = params.get(SALES_HASH_KEY);
+            if (!encoded) return;
+            try {
+                const compact = JSON.parse(decodeBase64Url(encoded));
+                if (!Array.isArray(compact)) return;
+                compact.forEach(item => {
+                    if (!Array.isArray(item) || typeof item[0] !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(item[0])) return;
+                    const monthKey = item[0];
+                    const saved = normalizeSavedAt(item[5]);
+                    monthlySales.push({
+                        monthKey,
+                        monthLabel: getMonthLabelFromKey(monthKey),
+                        propertiesSold: Number(item[1]) || 0,
+                        grossRevenue: Number(item[2]) || 0,
+                        expenses: Number(item[3]) || 0,
+                        netProfit: Number(item[4]) || 0,
+                        propertyPrices: [],
+                        savedAt: saved.savedAt,
+                        savedOn: saved.savedOn
+                    });
+                });
+                monthlySales.sort((a, b) => a.monthKey.localeCompare(b.monthKey));
+            } catch (error) {
+                console.warn('Unable to read monthly sales from the page URL.', error);
+            }
+        }
+
+        function formatAxisUGX(value) {
+            const absolute = Math.abs(value);
+            if (absolute >= 1000000) {
+                return 'UGX ' + (value / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+            }
+            if (absolute >= 1000) {
+                return 'UGX ' + Math.round(value / 1000) + 'k';
+            }
+            return 'UGX ' + Math.round(value);
+        }
+
+        function getNiceChartMax(value) {
+            const padded = Math.max(value * 1.1, 1000);
+            const magnitude = Math.pow(10, Math.floor(Math.log10(padded)));
+            return Math.ceil(padded / magnitude) * magnitude;
+        }
+
+        function buildMonthlySnapshot() {
+            const monthKey = currentCalculation ? currentCalculation.monthKey : getMonthKey();
+            const grossRevenue = currentCalculation ? currentCalculation.grossRevenue : propertyPrices.reduce((sum, price) => sum + price, 0);
+            const expenses = currentCalculation ? currentCalculation.expenses : readCosts().reduce((sum, cost) => sum + cost.value, 0);
+            return {
+                monthKey,
+                monthLabel: currentCalculation ? currentCalculation.monthLabel : getMonthLabel(),
+                propertiesSold: currentCalculation ? currentCalculation.propertiesSold : propertyPrices.length,
+                grossRevenue,
+                expenses,
+                netProfit: grossRevenue - expenses,
+                propertyPrices: propertyPrices.slice(),
+                savedAt: new Date().toISOString(),
+                savedOn: getFullDateLabel()
+            };
+        }
+
+        function saveMonthlySnapshot(snapshot) {
+            const existingIndex = monthlySales.findIndex(record => record.monthKey === snapshot.monthKey);
+            if (existingIndex === -1) {
+                monthlySales.push(snapshot);
+            } else {
+                monthlySales[existingIndex] = snapshot;
+            }
+            monthlySales.sort((a, b) => a.monthKey.localeCompare(b.monthKey));
+            promptedMonthKeys.add(snapshot.monthKey);
+            persistMonthlySalesToUrl();
+            renderMonthlySalesChart();
+            updateMonthlySalesSummary();
+            updateMonthlySaveStatus();
+        }
+
+        function saveConfirmationMessage(snapshot, action) {
+            return action + ' monthly sales for ' + snapshot.monthLabel + '?\n\n' +
+                'Date: ' + snapshot.savedOn + '\n' +
+                'Properties sold: ' + snapshot.propertiesSold + '\n' +
+                'Gross sales: ' + formatUGX(snapshot.grossRevenue) + '\n' +
+                'Expenses: ' + formatUGX(snapshot.expenses) + '\n' +
+                'Net profit: ' + formatUGX(snapshot.netProfit) + '\n\n' +
+                'OK = save this month to history.\n' +
+                'Cancel = keep these figures as a random-number check only.';
+        }
+
+        function requestSaveMonthlySales() {
+            if (!currentCalculation) calculate();
+            const snapshot = buildMonthlySnapshot();
+            const existing = monthlySales.some(record => record.monthKey === snapshot.monthKey);
+            const action = existing ? 'Update' : 'Save';
+            if (!window.confirm(saveConfirmationMessage(snapshot, action))) {
+                updateMonthlySaveStatus();
+                return;
+            }
+            saveMonthlySnapshot(snapshot);
+        }
+
+        function promptNewMonthSave() {
+            const monthKey = currentCalculation ? currentCalculation.monthKey : getMonthKey();
+            if (monthlySales.some(record => record.monthKey === monthKey) || promptedMonthKeys.has(monthKey)) {
+                return;
+            }
+            promptedMonthKeys.add(monthKey);
+            const snapshot = buildMonthlySnapshot();
+            const message = 'A new month has started: ' + snapshot.monthLabel + '.\n\n' + saveConfirmationMessage(snapshot, 'Save');
+            if (window.confirm(message)) {
+                saveMonthlySnapshot(snapshot);
+            } else {
+                updateMonthlySaveStatus();
+            }
+        }
+
+        async function requestResetMonthlySales() {
+            if (!monthlySales.length) {
+                window.alert('There is no plotted monthly sales data to reset.');
+                return;
+            }
+            const input = window.prompt('Enter the admin key to reset the plotted monthly sales data:');
+            if (!input) return;
+            await initAuth();
+            const valid = await verifyAuth(input);
+            if (!valid) {
+                window.alert('Invalid key. The plotted data was not reset.');
+                return;
+            }
+            if (!window.confirm('Reset all plotted monthly sales data? This removes every saved month and cannot be undone.')) {
+                return;
+            }
+            monthlySales.length = 0;
+            promptedMonthKeys.clear();
+            persistMonthlySalesToUrl();
+            renderMonthlySalesChart();
+            updateMonthlySalesSummary();
+            updateMonthlySaveStatus();
+        }
+
+        function csvEscape(value) {
+            const text = String(value == null ? '' : value);
+            return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+        }
+
+        function buildMonthlySalesCsv() {
+            const headers = ['Month Key', 'Month Label', 'Properties Sold', 'Gross Sales (UGX)', 'Expenses (UGX)', 'Net Profit (UGX)', 'Saved At'];
+            const rows = monthlySales.map(record => {
+                const saved = normalizeSavedAt(record.savedAt);
+                return [record.monthKey, record.monthLabel, record.propertiesSold, record.grossRevenue, record.expenses, record.netProfit, saved.savedAt];
+            });
+            return '\uFEFF' + [headers].concat(rows).map(row => row.map(csvEscape).join(',')).join('\r\n');
+        }
+
+        function exportMonthlySalesCsv() {
+            if (!monthlySales.length) {
+                window.alert('There is no plotted monthly sales data to export.');
+                return;
+            }
+            const blob = new Blob([buildMonthlySalesCsv()], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'zcanopy-monthly-sales-' + new Date().toISOString().slice(0, 10) + '.csv';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(function () {
+                URL.revokeObjectURL(url);
+            }, 1000);
+        }
+
+        function parseCsvRows(text) {
+            const source = String(text || '').replace(/^\uFEFF/, '');
+            const rows = [];
+            let row = [];
+            let field = '';
+            let inQuotes = false;
+            for (let index = 0; index < source.length; index++) {
+                const character = source[index];
+                if (inQuotes) {
+                    if (character === '"') {
+                        if (source[index + 1] === '"') {
+                            field += '"';
+                            index++;
+                        } else {
+                            inQuotes = false;
+                        }
+                    } else {
+                        field += character;
+                    }
+                    continue;
+                }
+                if (character === '"') {
+                    inQuotes = true;
+                } else if (character === ',') {
+                    row.push(field);
+                    field = '';
+                } else if (character === '\r' || character === '\n') {
+                    if (character === '\r' && source[index + 1] === '\n') index++;
+                    row.push(field);
+                    rows.push(row);
+                    row = [];
+                    field = '';
+                } else {
+                    field += character;
+                }
+            }
+            if (field.length || row.length) {
+                row.push(field);
+                rows.push(row);
+            }
+            return rows;
+        }
+
+        function normalizeCsvHeader(value) {
+            return String(value || '').replace(/^\uFEFF/, '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+        }
+
+        function findCsvColumn(headers, aliases) {
+            for (const alias of aliases) {
+                const normalized = normalizeCsvHeader(alias);
+                const index = headers.indexOf(normalized);
+                if (index !== -1) return index;
+            }
+            return -1;
+        }
+
+        function parseCsvNumber(value) {
+            const cleaned = String(value == null ? '' : value).replace(/[^0-9.-]/g, '');
+            if (!cleaned || cleaned === '-' || cleaned === '.' || cleaned === '-.') return NaN;
+            const number = Number(cleaned);
+            return Number.isFinite(number) ? number : NaN;
+        }
+
+        async function importMonthlySalesCsv(event) {
+            const input = event && event.target;
+            const file = input && input.files && input.files[0];
+            if (!file) return;
+            try {
+                const rows = parseCsvRows(await file.text());
+                if (rows.length < 2) {
+                    window.alert('The CSV does not contain any data rows.');
+                    return;
+                }
+                const headers = rows[0].map(normalizeCsvHeader);
+                const monthIndex = findCsvColumn(headers, ['Month Key', 'Month', 'Period']);
+                const propertiesIndex = findCsvColumn(headers, ['Properties Sold', 'Properties', 'Units Sold', 'Sold']);
+                const grossIndex = findCsvColumn(headers, ['Gross Sales (UGX)', 'Gross Sales', 'Gross Revenue', 'Gross Price', 'Gross']);
+                const expensesIndex = findCsvColumn(headers, ['Expenses (UGX)', 'Expenses', 'Expenditure', 'Gross Monthly Expenditure']);
+                const netIndex = findCsvColumn(headers, ['Net Profit (UGX)', 'Net Profit', 'Profits', 'Profit']);
+                const savedAtIndex = findCsvColumn(headers, ['Saved At', 'Saved Date', 'Date Saved', 'Timestamp']);
+                if (monthIndex === -1 || propertiesIndex === -1 || grossIndex === -1) {
+                    window.alert('The CSV needs Month Key, Properties Sold, and Gross Sales columns.');
+                    return;
+                }
+                const imported = new Map();
+                let skipped = 0;
+                for (let index = 1; index < rows.length; index++) {
+                    const row = rows[index];
+                    if (!row.some(cell => String(cell == null ? '' : cell).trim())) continue;
+                    const monthKey = String(row[monthIndex] || '').trim();
+                    const properties = parseCsvNumber(row[propertiesIndex]);
+                    const gross = parseCsvNumber(row[grossIndex]);
+                    const expensesCell = expensesIndex === -1 ? '' : String(row[expensesIndex] == null ? '' : row[expensesIndex]).trim();
+                    const expenses = expensesCell ? parseCsvNumber(expensesCell) : 0;
+                    const netCell = netIndex === -1 ? '' : String(row[netIndex] == null ? '' : row[netIndex]).trim();
+                    const net = netCell ? parseCsvNumber(netCell) : NaN;
+                    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(monthKey) ||
+                        !Number.isFinite(properties) || properties < 0 ||
+                        !Number.isFinite(gross) || gross < 0 ||
+                        !Number.isFinite(expenses) || expenses < 0) {
+                        skipped++;
+                        continue;
+                    }
+                    const saved = normalizeSavedAt(savedAtIndex === -1 ? '' : row[savedAtIndex]);
+                    const netProfit = Number.isFinite(net) ? net : gross - expenses;
+                    imported.set(monthKey, {
+                        monthKey,
+                        monthLabel: getMonthLabelFromKey(monthKey),
+                        propertiesSold: Math.round(properties),
+                        grossRevenue: Math.round(gross),
+                        expenses: Math.round(expenses),
+                        netProfit: Math.round(netProfit),
+                        propertyPrices: [],
+                        savedAt: saved.savedAt,
+                        savedOn: saved.savedOn
+                    });
+                }
+                if (!imported.size) {
+                    window.alert('No valid monthly sales rows were found in the CSV.');
+                    return;
+                }
+                const incoming = Array.from(imported.values());
+                const monthCount = incoming.length === 1 ? '1 month' : incoming.length + ' months';
+                if (monthlySales.length && !window.confirm('Import ' + monthCount + ' and merge with the current plotted data? Matching months will be updated.')) {
+                    return;
+                }
+                let added = 0;
+                let updated = 0;
+                incoming.forEach(record => {
+                    const existingIndex = monthlySales.findIndex(item => item.monthKey === record.monthKey);
+                    if (existingIndex === -1) {
+                        monthlySales.push(record);
+                        added++;
+                    } else {
+                        monthlySales[existingIndex] = record;
+                        updated++;
+                    }
+                });
+                monthlySales.sort((a, b) => a.monthKey.localeCompare(b.monthKey));
+                incoming.forEach(record => promptedMonthKeys.add(record.monthKey));
+                persistMonthlySalesToUrl();
+                renderMonthlySalesChart();
+                updateMonthlySalesSummary();
+                updateMonthlySaveStatus();
+                let message = 'Imported ' + monthCount + ': ' + added + ' added, ' + updated + ' updated.';
+                if (skipped) message += ' Skipped ' + skipped + ' invalid ' + (skipped === 1 ? 'row' : 'rows') + '.';
+                window.alert(message);
+            } catch (error) {
+                console.error('Unable to import monthly sales CSV.', error);
+                window.alert('Unable to import this CSV file.');
+            } finally {
+                if (input) input.value = '';
+            }
+        }
+
+        function updateMonthlySaveStatus() {
+            const statusEl = document.getElementById('monthlySaveStatus');
+            const saveButton = document.getElementById('saveMonthlySalesBtn');
+            if (!statusEl || !currentCalculation) return;
+            const record = monthlySales.find(item => item.monthKey === currentCalculation.monthKey);
+            if (saveButton) {
+                saveButton.textContent = record ? 'Update Monthly Sales' : 'Save Monthly Sales';
+            }
+            if (!record) {
+                statusEl.textContent = currentCalculation.monthLabel + ' not saved. Current figures are test-only.';
+                statusEl.className = 'text-xs font-semibold text-amber-600';
+                return;
+            }
+            const unchanged = record.propertiesSold === currentCalculation.propertiesSold &&
+                Math.round(record.grossRevenue) === Math.round(currentCalculation.grossRevenue) &&
+                Math.round(record.expenses) === Math.round(currentCalculation.expenses) &&
+                Math.round(record.netProfit) === Math.round(currentCalculation.netProfit);
+            if (unchanged) {
+                statusEl.textContent = currentCalculation.monthLabel + ' saved to this page link.';
+                statusEl.className = 'text-xs font-semibold text-emerald-600';
+            } else {
+                statusEl.textContent = currentCalculation.monthLabel + ' saved, but current figures have unsaved changes.';
+                statusEl.className = 'text-xs font-semibold text-amber-600';
+            }
+        }
+
+        function updateMonthlySalesSummary() {
+            const summaryEl = document.getElementById('monthlySalesSummary');
+            if (!summaryEl) return;
+            if (!monthlySales.length) {
+                summaryEl.textContent = 'No saved months yet.';
+                return;
+            }
+            const totalSales = monthlySales.reduce((sum, record) => sum + record.grossRevenue, 0);
+            const latest = monthlySales[monthlySales.length - 1];
+            summaryEl.textContent = monthlySales.length + ' month' + (monthlySales.length === 1 ? '' : 's') +
+                ' saved in this page link • Total gross sales ' + formatUGX(totalSales) +
+                ' • Latest: ' + latest.monthLabel + ' (' + formatUGX(latest.grossRevenue) + ')';
+        }
+
+        function renderMonthlySalesChart() {
+            const host = document.getElementById('monthlySalesChart');
+            if (!host) return;
+            if (!monthlySales.length) {
+                host.innerHTML = '<div class="h-56 rounded-xl border border-dashed border-slate-200 bg-slate-50 flex flex-col items-center justify-center px-4 text-center">' +
+                    '<p class="text-sm font-semibold text-slate-500">No saved monthly sales yet</p>' +
+                    '<p class="text-xs text-slate-400 mt-1">Click Save Monthly Sales to add this month to the chart.</p>' +
+                    '</div>';
+                return;
+            }
+
+            const width = Math.max(800, monthlySales.length * 70);
+            const height = 280;
+            const padding = { top: 24, right: 26, bottom: 52, left: 92 };
+            const plotWidth = width - padding.left - padding.right;
+            const plotHeight = height - padding.top - padding.bottom;
+            const bottom = padding.top + plotHeight;
+            const maxValue = getNiceChartMax(Math.max(...monthlySales.map(record => record.grossRevenue)));
+            const xFor = index => monthlySales.length === 1
+                ? padding.left + plotWidth / 2
+                : padding.left + (plotWidth * index) / (monthlySales.length - 1);
+            const yFor = value => padding.top + plotHeight - (Math.max(0, value) / maxValue) * plotHeight;
+            const points = monthlySales.map((record, index) => ({
+                x: xFor(index),
+                y: yFor(record.grossRevenue),
+                record
+            }));
+            const linePoints = points.map(point => point.x.toFixed(1) + ',' + point.y.toFixed(1)).join(' ');
+            const areaPoints = points.length > 1
+                ? points[0].x.toFixed(1) + ',' + bottom + ' ' + linePoints + ' ' + points[points.length - 1].x.toFixed(1) + ',' + bottom
+                : '';
+            const grid = [0, 1, 2, 3, 4].map(index => {
+                const value = (maxValue / 4) * index;
+                const y = yFor(value);
+                return '<line x1="' + padding.left + '" y1="' + y + '" x2="' + (width - padding.right) + '" y2="' + y + '" stroke="#E6D8C8" stroke-width="1" stroke-dasharray="3 4" />' +
+                    '<text x="' + (padding.left - 10) + '" y="' + (y + 4) + '" text-anchor="end" font-size="10" fill="#8A6A52">' + formatAxisUGX(value) + '</text>';
+            }).join('');
+            const xLabels = monthlySales.map((record, index) =>
+                '<text x="' + xFor(index) + '" y="' + (height - 20) + '" text-anchor="middle" font-size="10" fill="#8A6A52">' + getShortMonthLabel(record.monthKey) + '</text>'
+            ).join('');
+            const dots = monthlySales.map((record, index) => {
+                const x = xFor(index);
+                const y = yFor(record.grossRevenue);
+                return '<circle cx="' + x + '" cy="' + y + '" r="5" fill="#703010" stroke="#FFFCF7" stroke-width="2" data-sales-point="' + index + '" tabindex="0" style="cursor:pointer">' +
+                    '<title>' + record.monthLabel + ' — Gross: ' + formatUGX(record.grossRevenue) + '; Net profit: ' + formatUGX(record.netProfit) + '; Properties sold: ' + record.propertiesSold + '</title></circle>' +
+                    '<text x="' + x + '" y="' + (y - 12) + '" text-anchor="middle" font-size="10" font-weight="700" fill="#502000">' + formatAxisUGX(record.grossRevenue) + '</text>';
+            }).join('');
+
+            host.innerHTML = '<div class="relative" style="min-width:' + Math.max(560, monthlySales.length * 70) + 'px">' +
+                '<svg viewBox="0 0 ' + width + ' ' + height + '" class="w-full h-auto" role="img" aria-label="Monthly gross sales line chart">' +
+                grid +
+                (areaPoints ? '<polygon points="' + areaPoints + '" fill="#A06030" opacity="0.10" />' : '') +
+                '<polyline points="' + linePoints + '" fill="none" stroke="#905020" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />' +
+                xLabels +
+                dots +
+                '</svg>' +
+                '<div id="monthlySalesTooltip" role="tooltip" class="pointer-events-none absolute z-10 text-xs text-white bg-slate-900 rounded-xl px-3 py-2 shadow-lg whitespace-nowrap" style="display:none;transform:translate(-50%, calc(-100% - 12px));"></div>' +
+                '</div>';
+            bindMonthlySalesTooltip();
+        }
+
+        function showMonthlySalesTooltip(index, pointEl) {
+            const tooltip = document.getElementById('monthlySalesTooltip');
+            const record = monthlySales[index];
+            if (!tooltip || !record) return;
+            const wrapper = tooltip.parentElement;
+            tooltip.innerHTML = '<p class="font-bold mb-1">' + record.monthLabel + '</p>' +
+                '<p>Gross: <span class="font-semibold">' + formatUGX(record.grossRevenue) + '</span></p>' +
+                '<p>Net profit: <span class="font-semibold">' + formatUGX(record.netProfit) + '</span></p>' +
+                '<p>Properties sold: <span class="font-semibold">' + record.propertiesSold + '</span></p>';
+            tooltip.style.display = 'block';
+            const pointRect = pointEl.getBoundingClientRect();
+            const wrapperRect = wrapper.getBoundingClientRect();
+            let left = pointRect.left - wrapperRect.left + pointRect.width / 2;
+            const halfWidth = tooltip.offsetWidth / 2;
+            left = Math.min(Math.max(left, halfWidth + 4), wrapperRect.width - halfWidth - 4);
+            const pointTop = pointRect.top - wrapperRect.top;
+            const placeAbove = pointTop > tooltip.offsetHeight + 16;
+            tooltip.style.left = left + 'px';
+            tooltip.style.top = pointTop + 'px';
+            tooltip.style.transform = placeAbove ? 'translate(-50%, calc(-100% - 12px))' : 'translate(-50%, 12px)';
+        }
+
+        function hideMonthlySalesTooltip() {
+            const tooltip = document.getElementById('monthlySalesTooltip');
+            if (tooltip) tooltip.style.display = 'none';
+        }
+
+        function bindMonthlySalesTooltip() {
+            const host = document.getElementById('monthlySalesChart');
+            if (!host) return;
+            host.querySelectorAll('[data-sales-point]').forEach(point => {
+                const show = function () {
+                    showMonthlySalesTooltip(parseInt(point.dataset.salesPoint, 10), point);
+                };
+                point.addEventListener('mouseenter', show);
+                point.addEventListener('focus', show);
+                point.addEventListener('click', show);
+                point.addEventListener('touchstart', show, { passive: true });
+                point.addEventListener('mouseleave', hideMonthlySalesTooltip);
+                point.addEventListener('blur', hideMonthlySalesTooltip);
+            });
+        }
 
         function formatUGX(amount) {
             return 'UGX ' + Math.round(amount).toLocaleString();
@@ -516,6 +1190,7 @@
         }
 
         function calculate() {
+            const periodKey = refreshPeriodDisplay();
             const properties = propertyPrices.length;
 
             let expenses = 0;
@@ -559,6 +1234,23 @@
             share50.textContent = formatUGX(profitPool * 0.50);
             share30.textContent = formatUGX(profitPool * 0.30);
             share20.textContent = formatUGX(profitPool * 0.20);
+
+            currentCalculation = {
+                monthKey: periodKey,
+                monthLabel: getMonthLabel(),
+                propertiesSold: properties,
+                grossRevenue,
+                expenses,
+                netProfit,
+                propertyPrices: propertyPrices.slice()
+            };
+
+            if (periodKey !== activeMonthKey) {
+                activeMonthKey = periodKey;
+                promptNewMonthSave();
+            }
+
+            updateMonthlySaveStatus();
         }
 
         function resetCosts() {
@@ -586,9 +1278,20 @@
 
         costInputs.forEach(input => input.addEventListener('input', calculate));
 
+        loadMonthlySalesFromUrl();
         syncPropertyCount(parseInt(propertiesSoldInput.value, 10) || 0);
         renderPropertyInputs();
+        initAuth();
         calculate();
+        renderMonthlySalesChart();
+        updateMonthlySalesSummary();
+        setInterval(refreshPeriodDisplay, 60000);
+        window.addEventListener('hashchange', function () {
+            loadMonthlySalesFromUrl();
+            renderMonthlySalesChart();
+            updateMonthlySalesSummary();
+            updateMonthlySaveStatus();
+        });
     </script>
 </body>
 </html>
