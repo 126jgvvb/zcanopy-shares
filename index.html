@@ -1216,12 +1216,14 @@
             cardNetProfit.textContent = formatUGX(netProfit);
 
             const syncedProfit = Math.max(0, Math.round(netProfit));
+            const syncedGrossRevenue = Math.max(0, Math.round(grossRevenue));
             try {
                 localStorage.setItem('zcanopy_net_profit', String(syncedProfit));
+                localStorage.setItem('zcanopy_gross_revenue', String(syncedGrossRevenue));
             } catch (error) {}
             const sharesNavLink = document.getElementById('sharesNavLink');
             if (sharesNavLink) {
-                sharesNavLink.href = 'shares.html?payment=' + syncedProfit;
+                sharesNavLink.href = 'shares.html?payment=' + syncedProfit + '&gross=' + syncedGrossRevenue;
             }
 
             if (netProfit < 0) {

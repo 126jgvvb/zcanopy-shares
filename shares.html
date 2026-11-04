@@ -112,6 +112,8 @@
   .row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;font-size:14px;border-bottom:1px dashed var(--line)}
   .row:last-child{border-bottom:0}
   .row span:first-child{color:var(--muted)}
+  .row.subtotal{border-top:1px solid var(--line);border-bottom:0;margin-top:4px;padding-top:9px;font-weight:700;font-size:15px}
+  .row.subtotal span:first-child{color:inherit}
   .row.total{border-top:2px solid var(--green);border-bottom:0;margin-top:6px;padding-top:10px;font-weight:700;font-size:16px}
   .neg{color:var(--danger);font-weight:700}
   .retained-summary{
@@ -207,10 +209,14 @@
 
   <div class="panel no-print">
     <h2>Payment &amp; Share Settings</h2>
-    <div class="grid cols-2" style="margin-bottom:14px">
+    <div class="grid cols-3" style="margin-bottom:14px">
       <div>
         <label for="payment">Payment / Revenue Amount</label>
         <input type="number" id="payment" value="50000" min="0" step="0.01">
+      </div>
+      <div>
+        <label for="grossRevenue">Gross Revenue (from dashboard)</label>
+        <input type="number" id="grossRevenue" min="0" step="0.01" placeholder="Auto-filled from Calculated Gross Revenue">
       </div>
       <div>
         <label for="currency">Currency Label (optional)</label>
@@ -291,7 +297,7 @@
         <input type="number" id="depositPct" value="4" min="0" step="0.1" readonly>
       </div>
       <div>
-        <label for="feeBase">Percentage Fees Applied To</label>
+        <label for="feeBase">Platform Fee Applied To</label>
         <select id="feeBase">
           <option value="founder" selected>Founder's share</option>
           <option value="total">Total payment</option>
@@ -340,8 +346,9 @@
       </div>
       <p class="note">
         Formula: Founder gross = Payment &times; Founder %. Deductions = Withdraw fee + Platform fee + Savings/Reserve + Deposit fee.
+        Deposit fee = Deposit % &times; gross revenue from property sales (sum of each sold property's price).
         Founder net = Founder gross &minus; Deductions. Financer and Marketeer receive Payment &times; their respective %.
-        Withdraw fee follows the ioTec/Centipid tier schedule when enabled; otherwise the fixed value.
+        Withdraw fee follows the ioTec/Centipid tier schedule based on total net withdrawals when enabled, then is deducted from that total; otherwise the fixed value applies.
         A negative founder net means the deductions exceed the founder's share for that payment amount.
       </p>
     </div>
@@ -561,14 +568,14 @@ function fmt(v){
 }
 function cls(v){ return v < 0 ? 'neg' : ''; }
 
-function syncWithdrawFee(s){
+function syncWithdrawFee(s, withdrawBase){
   const input = document.getElementById('withdrawFee');
   const hint = document.getElementById('feeHint');
   if (s.useIotec){
-    const t = iotecTier(num('payment'));
+    const t = iotecTier(withdrawBase);
     input.value = t.total;
     input.readOnly = true;
-    if (hint) hint.textContent = 'Auto: ioTec ' + fmt(t.base) + ' + Centipid ' + fmt(t.centipid) + ' = ' + fmt(t.total) + ' for ' + fmt(t.min) + '–' + fmt(t.max) + ' range.';
+    if (hint) hint.textContent = 'Auto: ioTec ' + fmt(t.base) + ' + Centipid ' + fmt(t.centipid) + ' = ' + fmt(t.total) + ' for total net withdrawals of ' + fmt(withdrawBase) + ' (' + fmt(t.min) + '–' + fmt(t.max) + ' range).';
   } else {
     input.readOnly = false;
     if (hint) hint.textContent = 'Fixed fee applied manually (ioTec schedule disabled).';
@@ -585,6 +592,7 @@ function readSettings(){
     savings: num('savings'),
     platformPct: num('platformPct'),
     depositPct: num('depositPct'),
+    grossRevenue: document.getElementById('grossRevenue').value === '' ? null : num('grossRevenue'),
     feeBase: document.getElementById('feeBase').value
   };
 }
@@ -595,12 +603,17 @@ function calc(P, s){
   const marketeer = P * s.marketeer / 100;
   const base = s.feeBase === 'total' ? P : founderGross;
   const platformFee = base * s.platformPct / 100;
-  const depositFee = base * s.depositPct / 100;
-  const withdrawFee = withdrawFeeFor(P, s);
+  const depositBase = s.grossRevenue == null ? P : s.grossRevenue;
+  const depositFee = depositBase * s.depositPct / 100;
+  const founderNetBeforeFee = founderGross - platformFee - s.savings - depositFee;
+  const totalNetBeforeFee = founderNetBeforeFee + s.savings + financer + marketeer;
+  const withdrawFee = withdrawFeeFor(totalNetBeforeFee, s);
   const deductions = withdrawFee + platformFee + s.savings + depositFee;
   const founderNet = founderGross - deductions;
+  const totalNetWithdrawals = totalNetBeforeFee - withdrawFee;
   return {P, founderGross, financer, marketeer, platformFee, depositFee,
-          withdrawFee, savings: s.savings, deductions, founderNet};
+          withdrawFee, savings: s.savings, deductions, founderNet,
+          totalNetBeforeFee, totalNetWithdrawals};
 }
 
 function render(){
@@ -610,7 +623,7 @@ function render(){
 
   const P = num('payment');
   const r = calc(P, s);
-  syncWithdrawFee(s);
+  syncWithdrawFee(s, r.totalNetBeforeFee);
 
   document.getElementById('cards').innerHTML = `
     <div class="card">
@@ -620,7 +633,7 @@ function render(){
       <div class="row"><span>Platform fee (${s.platformPct}%)</span><span>- ${fmt(r.platformFee)}</span></div>
       <div class="row"><span>Savings / Reserve</span><span>- ${fmt(r.savings)}</span></div>
       <div class="row"><span>Deposit fee (${s.depositPct}%)</span><span>- ${fmt(r.depositFee)}</span></div>
-      <div class="row"><span>Total deductions</span><span>- ${fmt(r.deductions)}</span></div>
+      <div class="row subtotal"><span>Total deductions</span><span>- ${fmt(r.deductions)}</span></div>
       <div class="row total"><span>Net Founder Payout</span><span class="${cls(r.founderNet)}">${fmt(r.founderNet)}</span></div>
       <div class="retained-summary">
         <div class="row"><span>Net amount</span><span class="${cls(r.founderNet)}">${fmt(r.founderNet)}</span></div>
@@ -642,12 +655,11 @@ function render(){
     </div>`;
 
   const founderNetWithReserve = r.founderNet + r.savings;
-  const totalNetWithdrawals = founderNetWithReserve + r.financer + r.marketeer;
   document.getElementById('withdrawalSummary').innerHTML = `
     <div class="row"><span>Founder Net + Savings/Reserve</span><span class="${cls(founderNetWithReserve)}">${fmt(founderNetWithReserve)}</span></div>
     <div class="row"><span>Financer net payout</span><span>${fmt(r.financer)}</span></div>
     <div class="row"><span>Marketeer net payout</span><span>${fmt(r.marketeer)}</span></div>
-    <div class="row total"><span>Total Net Withdrawals</span><span class="${cls(totalNetWithdrawals)}">${fmt(totalNetWithdrawals)}</span></div>`;
+    <div class="row total"><span>Total Net Withdrawals</span><span class="${cls(r.totalNetWithdrawals)}">${fmt(r.totalNetWithdrawals)}</span></div>`;
 
   const head = `<tr>
       <th>Payment</th>
@@ -681,7 +693,9 @@ function render(){
   document.getElementById('reportHead').textContent =
     'Generated ' + new Date().toLocaleString() +
     ' | Payment: ' + fmt(P) +
-    ' | Fee base: ' + (s.feeBase === 'total' ? 'Total payment' : "Founder's share");
+    ' | Platform fee base: ' + (s.feeBase === 'total' ? 'Total payment' : "Founder's share") +
+    ' | Deposit fee base: ' + (s.grossRevenue == null ? 'Total payment' : fmt(s.grossRevenue) + ' gross revenue') +
+    ' | Withdraw fee base: Total net withdrawals';
 
   renderChart(s);
   renderInvoice();
@@ -1079,6 +1093,7 @@ function downloadPDF(){
 
 function resetForm(){
   document.getElementById('payment').value = 50000;
+  document.getElementById('grossRevenue').value = '';
   document.getElementById('currency').value = '';
   document.getElementById('founderPct').value = 50;
   document.getElementById('financerPct').value = 30;
@@ -1093,7 +1108,7 @@ function resetForm(){
   render();
 }
 
-['payment','currency','founderPct','financerPct','marketeerPct','withdrawFee','savings','platformPct','depositPct','feeBase',
+['payment','grossRevenue','currency','founderPct','financerPct','marketeerPct','withdrawFee','savings','platformPct','depositPct','feeBase',
  'invoiceNo','invoiceDate','invoiceRef','invoiceFrom','invoiceNotes']
   .forEach(id => document.getElementById(id).addEventListener('input', render));
 document.getElementById('feeBase').addEventListener('change', render);
@@ -1130,8 +1145,10 @@ document.getElementById('invoiceDate').value = new Date().toISOString().slice(0,
 setPctInputsReadOnly(true);
 initAuth().then(() => {
   let syncedPayment = null;
+  let syncedGrossRevenue = null;
   try {
-    const paramPayment = new URLSearchParams(window.location.search).get('payment');
+    const params = new URLSearchParams(window.location.search);
+    const paramPayment = params.get('payment');
     if (paramPayment !== null && paramPayment !== '' && isFinite(Number(paramPayment))) {
       syncedPayment = Number(paramPayment);
     } else {
@@ -1140,9 +1157,21 @@ initAuth().then(() => {
         syncedPayment = Number(storedNetProfit);
       }
     }
+    const paramGross = params.get('gross');
+    if (paramGross !== null && paramGross !== '' && isFinite(Number(paramGross))) {
+      syncedGrossRevenue = Number(paramGross);
+    } else {
+      const storedGrossRevenue = localStorage.getItem('zcanopy_gross_revenue');
+      if (storedGrossRevenue !== null && storedGrossRevenue !== '' && isFinite(Number(storedGrossRevenue))) {
+        syncedGrossRevenue = Number(storedGrossRevenue);
+      }
+    }
   } catch (error) {}
   if (syncedPayment !== null) {
     document.getElementById('payment').value = Math.max(0, syncedPayment);
+  }
+  if (syncedGrossRevenue !== null) {
+    document.getElementById('grossRevenue').value = Math.max(0, syncedGrossRevenue);
   }
   render();
 });
